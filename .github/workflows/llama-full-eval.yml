@@ -1,0 +1,133 @@
+name: Full Llama Agentic Security Evaluation
+
+on:
+  push:
+    branches: [llama-full-eval]
+    paths:
+      - '.github/workflows/llama-full-eval.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct and verify benchmark sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p experiment
+          cat payload/harness.b64.* | base64 -d > full_llama_agentic_eval.py
+          cat payload/pipeline.b64.* | base64 -d > experiment/agent_pipeline.py
+          base64 -d payload/corpus.json.gz.b64 | gunzip > experiment/corpus_augmented.json
+          echo 'ca5b6f2a37b1b647ebe331d181ce9a87a2dcbec53b419104b3035283ab230f1a  full_llama_agentic_eval.py' | sha256sum -c -
+          echo 'f8a51bcd88647eb35da48f3fcb94f1b9e6335ecaa92866f161fcb7cdf73f2f80  experiment/agent_pipeline.py' | sha256sum -c -
+          echo 'ec6401d8b49020239602bc030bdada6fd3ce4ff8ce37fde0017e7989add0926a  experiment/corpus_augmented.json' | sha256sum -c -
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependency
+        run: python -m pip install --disable-pip-version-check requests==2.32.5
+
+      - name: Compile and validate full matrix
+        run: |
+          python -m py_compile full_llama_agentic_eval.py experiment/agent_pipeline.py
+          python full_llama_agentic_eval.py \
+            --bundle-dir . \
+            --provider compatible \
+            --base-url https://example.invalid/v1 \
+            --model llama3.1:8b \
+            --repeats 5 \
+            --out-dir dryrun \
+            --dry-run \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 20
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and pull Meta Llama 3.1 8B
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup ollama serve > ollama.log 2>&1 &
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
+            sleep 2
+          done
+          ollama pull llama3.1:8b
+          ollama list
+
+      - name: Run shard ${{ matrix.shard }}
+        run: |
+          python full_llama_agentic_eval.py \
+            --bundle-dir . \
+            --provider ollama \
+            --model llama3.1:8b \
+            --repeats 5 \
+            --temperature 0.2 \
+            --seed 42 \
+            --modes M0,M1,M2,M3lex,M3cap \
+            --groups main241,adaptive,privileged_benign,multistep_benign \
+            --max-steps 3 \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 20 \
+            --out-dir results/shard-${{ matrix.shard }}
+
+      - name: Attach Ollama log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-log-${{ matrix.shard }}
+          path: ollama.log
+          if-no-files-found: ignore
+
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-results-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    if: always()
+    needs: evaluate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: llama-results-*
+          path: downloaded
+          merge-multiple: false
+
+      - name: Aggregate results
+        run: python aggregate_llama_results.py --input-root downloaded --out-dir combined
+
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-full-combined-results
+          path: combined
+          retention-days: 30
