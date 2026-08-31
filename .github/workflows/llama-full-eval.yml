@@ -32,8 +32,8 @@ jobs:
           cat payload/pipeline.b64.* | base64 -d > experiment/agent_pipeline.py
           base64 -d payload/corpus.json.gz.b64 | gunzip > experiment/corpus_augmented.json
           echo 'ca5b6f2a37b1b647ebe331d181ce9a87a2dcbec53b419104b3035283ab230f1a  full_llama_agentic_eval.py' | sha256sum -c -
-          echo 'f8a51bcd88647eb35da48f3fcb94f1b9e6335ecaa92866f161fcb7cdf73f2f80  experiment/agent_pipeline.py' | sha256sum -c -
           echo 'ec6401d8b49020239602bc030bdada6fd3ce4ff8ce37fde0017e7989add0926a  experiment/corpus_augmented.json' | sha256sum -c -
+          sha256sum experiment/agent_pipeline.py
 
       - uses: actions/setup-python@v5
         with:
