@@ -1,0 +1,127 @@
+name: Argument-Aware Llama Security Rerun
+
+on:
+  push:
+    branches: [llama-full-eval]
+    paths:
+      - '.github/workflows/argument-aware-rerun.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct verified sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p experiment
+          base64 -d payload/argaware_eval.py.gz.b64 | gunzip > argument_aware_llama_eval.py
+          base64 -d payload/pipeline.py.gz.b64 | gunzip > experiment/agent_pipeline.py
+          echo 'db33991da0580275d7a4c6ebc6cac9f14d15a4537bf30f332b067086dcc37abd  argument_aware_llama_eval.py' | sha256sum -c -
+          echo 'f8a51bcd88647eb35da48f3fcb94f1b9e6335ecaa92866f161fcb7cdf73f2f80  experiment/agent_pipeline.py' | sha256sum -c -
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependency
+        run: python -m pip install --disable-pip-version-check requests==2.32.5
+
+      - name: Compile and validate matrix
+        run: |
+          python -m py_compile argument_aware_llama_eval.py experiment/agent_pipeline.py aggregate_argument_aware.py
+          python argument_aware_llama_eval.py \
+            --bundle-dir . \
+            --provider compatible \
+            --base-url https://example.invalid/v1 \
+            --model llama3.1:8b \
+            --repeats 5 \
+            --out-dir dryrun \
+            --dry-run \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 20
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama and pull Meta Llama 3.1 8B
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup ollama serve > ollama.log 2>&1 &
+          for i in {1..60}; do
+            if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
+            sleep 2
+          done
+          ollama pull llama3.1:8b
+          ollama list
+
+      - name: Run argument-aware shard ${{ matrix.shard }}
+        run: |
+          python argument_aware_llama_eval.py \
+            --bundle-dir . \
+            --provider ollama \
+            --model llama3.1:8b \
+            --repeats 5 \
+            --temperature 0.2 \
+            --seed 42 \
+            --modes M0,M1,M2,M3lex,M3cap,M3arg \
+            --max-steps 3 \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 20 \
+            --out-dir results/shard-${{ matrix.shard }}
+
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: argaware-results-${{ matrix.shard }}
+          path: results/shard-${{ matrix.shard }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Attach Ollama log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: argaware-ollama-log-${{ matrix.shard }}
+          path: ollama.log
+          if-no-files-found: ignore
+
+  aggregate:
+    if: always()
+    needs: evaluate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Reconstruct evaluation script
+        run: base64 -d payload/argaware_eval.py.gz.b64 | gunzip > argument_aware_llama_eval.py
+      - name: Download shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: argaware-results-*
+          path: downloaded
+          merge-multiple: false
+      - name: Aggregate and validate
+        run: python aggregate_argument_aware.py --input-root downloaded --out-dir combined --exp-script argument_aware_llama_eval.py
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: argument-aware-llama-results
+          path: combined
+          retention-days: 30
