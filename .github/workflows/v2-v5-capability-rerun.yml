@@ -30,9 +30,11 @@ jobs:
           cat payload/harness.b64.* | base64 -d > full_llama_agentic_eval.py
           cat payload/pipeline.b64.* | base64 -d > experiment/agent_pipeline.py
           base64 -d payload/corpus.json.gz.b64 | gunzip > experiment/corpus_augmented.json
-          base64 -d payload/v2v5_rerun.py.gz.b64 | gunzip > v2_v5_capability_rerun.py
+          cat payload/v2v5_rerun.py.gz.b64.* | base64 -d | gunzip > v2_v5_capability_rerun.py
           echo 'ca5b6f2a37b1b647ebe331d181ce9a87a2dcbec53b419104b3035283ab230f1a  full_llama_agentic_eval.py' | sha256sum -c -
           echo 'ec6401d8b49020239602bc030bdada6fd3ce4ff8ce37fde0017e7989add0926a  experiment/corpus_augmented.json' | sha256sum -c -
+          echo '8f0b00d47e822c18bb7a3c91643229f3f45b5f510d98ca0bac98507b7b918160  v2_v5_capability_rerun.py' | sha256sum -c -
+          sha256sum v2_v5_capability_rerun.py aggregate_v2_v5.py
 
       - uses: actions/setup-python@v5
         with:
@@ -43,7 +45,7 @@ jobs:
 
       - name: Compile and validate rerun matrix
         run: |
-          python -m py_compile full_llama_agentic_eval.py v2_v5_capability_rerun.py experiment/agent_pipeline.py
+          python -m py_compile full_llama_agentic_eval.py v2_v5_capability_rerun.py aggregate_v2_v5.py experiment/agent_pipeline.py
           python v2_v5_capability_rerun.py \
             --bundle-dir . \
             --provider compatible \
@@ -111,8 +113,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Reconstruct rerun module
-        run: base64 -d payload/v2v5_rerun.py.gz.b64 | gunzip > v2_v5_capability_rerun.py
       - name: Download shard artifacts
         uses: actions/download-artifact@v4
         with:
