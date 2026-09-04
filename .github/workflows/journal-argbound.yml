@@ -1,0 +1,99 @@
+name: Journal Argument-Bound Multi-Model Evaluation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [journal-argbound-full]
+    paths:
+      - '.github/workflows/journal-argbound.yml'
+      - 'journal_argbound_eval.py'
+      - 'aggregate_journal_argbound.py'
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        model:
+          - name: llama3.1:8b
+            slug: llama31-8b
+          - name: qwen3:8b
+            slug: qwen3-8b
+          - name: phi4-mini:3.8b
+            slug: phi4mini-38b
+          - name: granite3.3:8b
+            slug: granite33-8b
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Python dependency
+        run: python -m pip install --disable-pip-version-check requests==2.32.5
+      - name: Validate benchmark matrix
+        run: python journal_argbound_eval.py --model '${{ matrix.model.name }}' --shard '${{ matrix.shard }}' --shards 20 --repeats 5 --out-dir dryrun --dry-run
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+      - name: Start Ollama and pull model
+        run: |
+          ollama serve > ollama.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then break; fi
+            sleep 2
+          done
+          ollama pull '${{ matrix.model.name }}'
+      - name: Run model shard
+        run: |
+          python journal_argbound_eval.py \
+            --model '${{ matrix.model.name }}' \
+            --shard '${{ matrix.shard }}' \
+            --shards 20 \
+            --repeats 5 \
+            --timeout 180 \
+            --out-dir 'out/${{ matrix.model.slug }}/shard-${{ matrix.shard }}'
+      - name: Upload shard results
+        uses: actions/upload-artifact@v4
+        with:
+          name: argconfuse-${{ matrix.model.slug }}-${{ matrix.shard }}
+          path: out
+          retention-days: 30
+      - name: Attach Ollama log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-log-${{ matrix.model.slug }}-${{ matrix.shard }}
+          path: ollama.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  aggregate:
+    if: always()
+    needs: evaluate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download evaluation artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: argconfuse-*
+          path: downloaded
+          merge-multiple: false
+      - name: Aggregate and validate
+        run: python aggregate_journal_argbound.py --input-root downloaded --out-dir combined --expected-models 4 --expected-cells-per-model 9000
+      - name: Upload combined journal results
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-argbound-full-results
+          path: combined
+          retention-days: 60
